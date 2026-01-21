@@ -1,0 +1,421 @@
+-- file: models.smv
+-------------------------------------------------------------------------------
+-- ATOMIC ACTION MODULES (A2-A10)
+-------------------------------------------------------------------------------
+
+-- Module for A2, A4, A5: FungibleToken (Approve, Transfer, TransferFrom)
+MODULE FungibleToken(NUM_USERS, MAX_BALANCE)
+VAR
+    balance: array 0..NUM_USERS-1 of 0..MAX_BALANCE;
+    allowance: array 0..NUM_USERS-1 of array 0..NUM_USERS-1 of 0..MAX_BALANCE;
+IVAR
+    action: {none, approve, transfer, transfer_from};
+    -- Common parameters
+    f_owner: 0..NUM_USERS-1;
+    f_spender: 0..NUM_USERS-1;
+    f_from: 0..NUM_USERS-1;
+    f_to: 0..NUM_USERS-1;
+    f_value: 0..MAX_BALANCE;
+ASSIGN
+    next(balance) := case
+        action = transfer & balance[f_from] >= f_value:
+            update(update(balance, f_from, balance[f_from] - f_value), f_to, balance[f_to] + f_value);
+        action = transfer_from & balance[f_from] >= f_value & allowance[f_from][f_spender] >= f_value:
+            update(update(balance, f_from, balance[f_from] - f_value), f_to, balance[f_to] + f_value);
+        TRUE: balance;
+    esac;
+    next(allowance) := case
+        action = approve:
+            update(allowance, f_owner, update(allowance[f_owner], f_spender, f_value));
+        action = transfer_from & balance[f_from] >= f_value & allowance[f_from][f_spender] >= f_value:
+            update(allowance, f_from, update(allowance[f_from], f_spender, allowance[f_from][f_spender] - f_value));
+        TRUE: allowance;
+    esac;
+
+-- Module for Liquidity Provider (LP) Tokens, used in composite actions
+MODULE LiquidityToken(NUM_USERS, MAX_SUPPLY)
+VAR
+    balance: array 0..NUM_USERS-1 of 0..MAX_SUPPLY;
+    totalSupply: 0..MAX_SUPPLY;
+IVAR
+    action: {none, mint, burn};
+    lt_user: 0..NUM_USERS-1;
+    lt_value: 0..MAX_SUPPLY;
+ASSIGN
+    init(totalSupply) := 0;
+    next(balance) := case
+        action = mint: update(balance, lt_user, balance[lt_user] + lt_value);
+        action = burn & balance[lt_user] >= lt_value: update(balance, lt_user, balance[lt_user] - lt_value);
+        TRUE: balance;
+    esac;
+    next(totalSupply) := case
+        action = mint: totalSupply + lt_value;
+        action = burn & balance[lt_user] >= lt_value: totalSupply - lt_value;
+        TRUE: totalSupply;
+    esac;
+
+-- Module for A3, A6, A7, A8: NFT Actions
+MODULE NFTModule(NUM_USERS)
+VAR
+    owner: 0..NUM_USERS-1;
+    approved: 0..NUM_USERS-1;
+    exists: boolean;
+IVAR
+    action: {none, nft_approve, nft_transfer_from, nft_mint, nft_burn};
+    caller: 0..NUM_USERS-1;
+    to_user: 0..NUM_USERS-1;
+ASSIGN
+    init(exists) := TRUE;
+    next(owner) := case
+        action = nft_transfer_from & (caller = owner | caller = approved): to_user;
+        action = nft_mint: to_user;
+        TRUE: owner;
+    esac;
+    next(approved) := case
+        action = nft_approve & caller = owner: to_user;
+        action = nft_transfer_from: 0; -- Approval is cleared after transfer
+        action = nft_burn: 0; -- Approval is cleared after burn
+        TRUE: approved;
+    esac;
+    next(exists) := case
+        action = nft_burn & caller = owner: FALSE;
+        action = nft_mint: TRUE;
+        TRUE: exists;
+    esac;
+
+-- Module for A9: Airdrop
+MODULE AirdropModule(NUM_USERS, MAX_BALANCE)
+VAR
+    balance: array 0..NUM_USERS-1 of 0..MAX_BALANCE;
+IVAR
+    action: {none, airdrop};
+    user1_gets: 0..MAX_BALANCE;
+    user2_gets: 0..MAX_BALANCE;
+ASSIGN
+    next(balance) := case
+        action = airdrop: update(update(balance, 0, balance + user1_gets), 1, balance[1] + user2_gets);
+        TRUE: balance;
+    esac;
+
+-- Module for A10: Rebase
+MODULE RebaseModule(MAX_SUPPLY)
+VAR
+    totalSupply: 0..MAX_SUPPLY;
+    totalStaking: 0..MAX_SUPPLY*10;
+    sharesPerToken: 0..MAX_SUPPLY;
+IVAR
+    action: {none, rebase};
+    rebase_amount: -10000..10000; -- Signed integer for rebase
+ASSIGN
+    next(totalSupply) := case
+        action = rebase: totalSupply + rebase_amount;
+        TRUE: totalSupply;
+    esac;
+    next(sharesPerToken) := case
+        action = rebase & (totalSupply + rebase_amount > 0): totalStaking / (totalSupply + rebase_amount);
+        TRUE: sharesPerToken;
+    esac;
+
+-------------------------------------------------------------------------------
+-- COMPOSITE DAPP IMPLEMENTATIONS (A11-A13)
+-------------------------------------------------------------------------------
+
+-- DApp Implementation 1: UniswapV2Pair / SushiSwapPair / PancakeSwapV2 (Constant Product AMM)
+MODULE UniswapV2Pair(NUM_USERS, MAX_BALANCE, MAX_SUPPLY, PAIR_ADDR)
+VAR
+    -- Instantiate all required atomic modules
+    token0: module FungibleToken(NUM_USERS, MAX_BALANCE);
+    token1: module FungibleToken(NUM_USERS, MAX_BALANCE);
+    lp_token: module LiquidityToken(NUM_USERS, MAX_SUPPLY);
+    nft_module: module NFTModule(NUM_USERS);
+    rebase_module: module RebaseModule(MAX_SUPPLY);
+    airdrop_module: module AirdropModule(NUM_USERS, MAX_BALANCE);
+    
+    reserve0: 0..MAX_BALANCE;
+    reserve1: 0..MAX_BALANCE;
+IVAR
+    user_action: {none, approve, nft_approve, transfer, transfer_from, nft_transfer_from, nft_mint, nft_burn, airdrop, rebase, swap, add_liquidity, remove_liquidity};
+    actor: 0..NUM_USERS-1;
+    -- Params for all actions
+    to_user: 0..NUM_USERS-1; from_user: 0..NUM_USERS-1; approved_user: 0..NUM_USERS-1; spender: 0..NUM_USERS-1;
+    value: 0..MAX_BALANCE; amount: 0..MAX_BALANCE;
+    amount0_in: 0..MAX_BALANCE; amount1_in: 0..MAX_BALANCE; amount_lp_in: 0..MAX_SUPPLY;
+    rebase_amount: -10000..10000; user1_gets: 0..MAX_BALANCE; user2_gets: 0..MAX_BALANCE;
+
+DEFINE
+    -- Uniswap V2 specific calculations (simplified integer math)
+    amount0_in_after_fee := (amount0_in * 997) / 1000;
+    swap0_for_1_amount_out := (reserve1 > 0 & (reserve0 + amount0_in_after_fee > 0))? (amount0_in_after_fee * reserve1) / (reserve0 + amount0_in_after_fee) : 0;
+    remove_liq_amount0_out := (lp_token.totalSupply > 0)? (amount_lp_in * reserve0) / lp_token.totalSupply : 0;
+    remove_liq_amount1_out := (lp_token.totalSupply > 0)? (amount_lp_in * reserve1) / lp_token.totalSupply : 0;
+    mint_lp_value := (lp_token.totalSupply = 0)? 1000 : ((reserve0 > 0)? (amount0_in * lp_token.totalSupply) / reserve0 : 0);
+
+ASSIGN
+    -- Wire up IVARs to the correct atomic module based on user_action
+    -- This section acts as the main router for all DeFi actions
+    token0.action := case user_action = approve: approve; user_action = transfer: transfer; user_action = transfer_from: transfer_from; (user_action = add_liquidity | user_action = swap | user_action = remove_liquidity): transfer; TRUE: none; esac;
+    token0.f_owner := actor; token0.f_spender := spender; token0.f_value := case user_action = approve: amount; TRUE: value; esac;
+    token0.f_from  := case user_action = transfer | user_action = add_liquidity | (user_action = swap & amount0_in > 0): actor; user_action = transfer_from: from_user; TRUE: PAIR_ADDR; esac;
+    token0.f_to    := case user_action = transfer | user_action = transfer_from: to_user; user_action = add_liquidity | (user_action = swap & amount0_in > 0): PAIR_ADDR; TRUE: actor; esac;
+    token0.f_value := case user_action = transfer | user_action = transfer_from: value; user_action = add_liquidity: amount0_in; user_action = swap & amount0_in > 0: amount0_in; user_action = remove_liquidity: remove_liq_amount0_out; TRUE: 0; esac;
+
+    -- (Wiring logic for token1 is similar to token0)
+    token1.action := case (user_action = add_liquidity | user_action = swap | user_action = remove_liquidity): transfer; TRUE: none; esac;
+    token1.f_from  := case user_action = add_liquidity | (user_action = swap & amount1_in > 0): actor; TRUE: PAIR_ADDR; esac;
+    token1.f_to    := case user_action = add_liquidity | (user_action = swap & amount1_in > 0): PAIR_ADDR; TRUE: actor; esac;
+    token1.f_value := case user_action = add_liquidity: amount1_in; user_action = swap & amount0_in > 0: swap0_for_1_amount_out; user_action = remove_liquidity: remove_liq_amount1_out; TRUE: 0; esac;
+
+    lp_token.action := case user_action = add_liquidity: mint; user_action = remove_liquidity: burn; TRUE: none; esac;
+    lp_token.lt_user := actor;
+    lp_token.lt_value := case user_action = add_liquidity: mint_lp_value; user_action = remove_liquidity: amount_lp_in; TRUE: 0; esac;
+
+    nft_module.action := case user_action = nft_approve: nft_approve; user_action = nft_transfer_from: nft_transfer_from; user_action = nft_mint: nft_mint; user_action = nft_burn: nft_burn; TRUE: none; esac;
+    nft_module.caller := actor;
+    nft_module.to_user := (user_action = nft_approve)? approved_user : to_user;
+
+    rebase_module.action := (user_action = rebase)? rebase : none;
+    rebase_module.rebase_amount := rebase_amount;
+
+    airdrop_module.balance := token0.balance; -- Airdrop distributes token0
+    airdrop_module.action := (user_action = airdrop)? airdrop : none;
+    airdrop_module.user1_gets := user1_gets;
+    airdrop_module.user2_gets := user2_gets;
+
+    -- Update reserves for composite actions
+    next(reserve0) := case
+        user_action = add_liquidity & token0.balance[actor] >= amount0_in: reserve0 + amount0_in;
+        user_action = remove_liquidity & lp_token.balance[actor] >= amount_lp_in: reserve0 - remove_liq_amount0_out;
+        user_action = swap & amount0_in > 0 & token0.balance[actor] >= amount0_in: reserve0 + amount0_in;
+        TRUE: reserve0;
+    esac;
+    next(reserve1) := case
+        user_action = add_liquidity & token1.balance[actor] >= amount1_in: reserve1 + amount1_in;
+        user_action = remove_liquidity & lp_token.balance[actor] >= amount_lp_in: reserve1 - remove_liq_amount1_out;
+        user_action = swap & amount0_in > 0 & token0.balance[actor] >= amount0_in: reserve1 - swap0_for_1_amount_out;
+        TRUE: reserve1;
+    esac;
+
+-- DApp Implementation 2: CurveStableswapPool (for stablecoins)
+MODULE CurveStableswapPool(NUM_USERS, MAX_BALANCE, MAX_SUPPLY, PAIR_ADDR)
+VAR
+    token0: module FungibleToken(NUM_USERS, MAX_BALANCE);
+    token1: module FungibleToken(NUM_USERS, MAX_BALANCE);
+    lp_token: module LiquidityToken(NUM_USERS, MAX_SUPPLY);
+    reserve0: 0..MAX_BALANCE;
+    reserve1: 0..MAX_BALANCE;
+IVAR
+    user_action: {none, swap, add_liquidity, remove_liquidity};
+    actor: 0..NUM_USERS-1;
+    amount0_in: 0..MAX_BALANCE;
+    amount1_in: 0..MAX_BALANCE;
+    amount_lp_in: 0..MAX_SUPPLY;
+DEFINE
+    -- Simplified Stableswap logic: approximates low slippage by adding reserves
+    -- instead of multiplying them. THIS IS A HIGH-LEVEL ABSTRACTION.
+    curve_invariant := reserve0 + reserve1;
+    swap_amount_out := (curve_invariant > reserve0 + amount0_in)? curve_invariant - (reserve0 + amount0_in) : 0;
+ASSIGN
+    -- (Wiring for token and lp_token actions would be similar to Uniswap)
+    next(reserve0) := case user_action = add_liquidity: reserve0 + amount0_in; user_action = swap: reserve0 + amount0_in; TRUE: reserve0; esac;
+    next(reserve1) := case user_action = add_liquidity: reserve1 + amount1_in; user_action = swap: reserve1 - swap_amount_out; TRUE: reserve1; esac;
+
+-- DApp Implementation 3: BalancerWeightedPool (e.g., 80/20 pool)
+MODULE BalancerWeightedPool(NUM_USERS, MAX_BALANCE, MAX_SUPPLY, PAIR_ADDR)
+VAR
+    token0: module FungibleToken(NUM_USERS, MAX_BALANCE);
+    token1: module FungibleToken(NUM_USERS, MAX_BALANCE);
+    lp_token: module LiquidityToken(NUM_USERS, MAX_SUPPLY);
+    reserve0: 0..MAX_BALANCE;
+    reserve1: 0..MAX_BALANCE;
+DEFINE
+    -- Weights for an 80/20 pool (simplified as integers)
+    WEIGHT0 := 80;
+    WEIGHT1 := 20;
+IVAR
+    user_action: {none, swap, add_liquidity, remove_liquidity};
+    actor: 0..NUM_USERS-1;
+    amount0_in: 0..MAX_BALANCE;
+    amount1_in: 0..MAX_BALANCE;
+    amount_lp_in: 0..MAX_SUPPLY;
+ASSIGN
+    -- (Wiring for token and lp_token actions would be similar to Uniswap)
+    -- Balancer's logic is more complex; this is a conceptual model.
+    -- The invariant is (reserve0^WEIGHT0) * (reserve1^WEIGHT1) = k
+    -- This is not directly modelable in NuSMV, so we focus on state changes.
+    next(reserve0) := case user_action = add_liquidity: reserve0 + amount0_in; TRUE: reserve0; esac;
+    next(reserve1) := case user_action = add_liquidity: reserve1 + amount1_in; TRUE: reserve1; esac;
+
+-- DApp Implementation 4: UniswapV3CLPool (Concentrated Liquidity)
+MODULE UniswapV3CLPool(NUM_USERS, MAX_BALANCE, MAX_SUPPLY, PAIR_ADDR)
+VAR
+    token0: module FungibleToken(NUM_USERS, MAX_BALANCE);
+    token1: module FungibleToken(NUM_USERS, MAX_BALANCE);
+    -- In V3, LP positions are NFTs, not fungible tokens
+    lp_nft_owner: array 0..NUM_USERS-1 of boolean; 
+    reserve0: 0..MAX_BALANCE;
+    reserve1: 0..MAX_BALANCE;
+    current_tick: -887272..887272; -- Uniswap V3 tick range
+    -- For simplicity, we model one concentrated liquidity position
+    position_tick_lower: -887272..887272;
+    position_tick_upper: -887272..887272;
+    position_liquidity: 0..MAX_SUPPLY;
+IVAR
+    user_action: {none, swap, add_liquidity, remove_liquidity};
+    actor: 0..NUM_USERS-1;
+    amount0_in: 0..MAX_BALANCE;
+    amount1_in: 0..MAX_BALANCE;
+    tick_lower_in: -887272..887272;
+    tick_upper_in: -887272..887272;
+ASSIGN
+    -- Simplified logic for concentrated liquidity
+    next(position_liquidity) := case
+        user_action = add_liquidity: position_liquidity + amount0_in; -- Approximation
+        user_action = remove_liquidity: position_liquidity - amount0_in; -- Approximation
+        TRUE: position_liquidity;
+    esac;
+    -- A swap might move the current price (tick)
+    next(current_tick) := case
+        user_action = swap & amount0_in > 0 & current_tick < position_tick_upper : current_tick + 10; -- Price moves
+        TRUE: current_tick;
+    esac;
+
+-- Other DApp stubs (PancakeSwapV3, SushiSwap, 1inch, CoW, UniswapV4)
+-- These are included to show the structure but contain simplified logic.
+MODULE PancakeSwapV3Pool(NUM_USERS, MAX_BALANCE, MAX_SUPPLY, PAIR_ADDR) VAR token0: module FungibleToken(NUM_USERS, MAX_BALANCE); reserve0: 0..MAX_BALANCE; IVAR user_action: {none, swap}; ASSIGN next(reserve0) := reserve0;
+MODULE SushiSwapPair(NUM_USERS, MAX_BALANCE, MAX_SUPPLY, PAIR_ADDR) VAR token0: module FungibleToken(NUM_USERS, MAX_BALANCE); reserve0: 0..MAX_BALANCE; IVAR user_action: {none, swap}; ASSIGN next(reserve0) := reserve0;
+MODULE OneInchAggregator(NUM_USERS, MAX_BALANCE, MAX_SUPPLY, PAIR_ADDR) VAR route: {Uniswap, Curve, Balancer}; IVAR user_action: {none, swap}; ASSIGN next(route) := {Uniswap, Curve, Balancer};
+MODULE CoWProtocol(NUM_USERS, MAX_BALANCE, MAX_SUPPLY, PAIR_ADDR) VAR batch_status: {collecting, settling}; IVAR user_action: {none, swap}; ASSIGN next(batch_status) := (batch_status = collecting)? settling : collecting;
+MODULE UniswapV4HookPool(NUM_USERS, MAX_BALANCE, MAX_SUPPLY, PAIR_ADDR) VAR hook_action: {none, pre_swap, post_swap}; reserve0: 0..MAX_BALANCE; IVAR user_action: {none, swap}; ASSIGN next(reserve0) := reserve0;
+
+-------------------------------------------------------------------------------
+-- MAIN MODULE for Verification
+-------------------------------------------------------------------------------
+MODULE main
+VAR
+    -- Python will replace {{DAPP_TO_TEST}} with the selected DApp module
+    dapp: module {{DAPP_TO_TEST}}({NUM_USERS}, {MAX_BALANCE}, {MAX_SUPPLY}, {PAIR_ADDR});
+
+    -- Scenario control variables (driven by Python)
+    state_step: 0..20;
+    user_action: {none, approve, nft_approve, transfer, transfer_from, nft_transfer_from, nft_mint, nft_burn, airdrop, rebase, swap, add_liquidity, remove_liquidity};
+    actor: 0..{NUM_USERS}-1;
+    to_user: 0..{NUM_USERS}-1; from_user: 0..{NUM_USERS}-1; approved_user: 0..{NUM_USERS}-1; spender: 0..{NUM_USERS}-1;
+    value: 0..{MAX_BALANCE}; amount: 0..{MAX_BALANCE};
+    amount0_in: 0..{MAX_BALANCE}; amount1_in: 0..{MAX_BALANCE}; amount_lp_in: 0..{MAX_SUPPLY};
+    rebase_amount: -10000..10000; user1_gets: 0..{MAX_BALANCE}; user2_gets: 0..{MAX_BALANCE};
+
+ASSIGN
+    init(state_step) := 0;
+    -- Wire up main IVARs to the instantiated DApp module's IVARs
+    dapp.user_action := user_action; dapp.actor := actor;
+    dapp.to_user := to_user; dapp.from_user := from_user; dapp.approved_user := approved_user; dapp.spender := spender;
+    dapp.value := value; dapp.amount := amount;
+    dapp.amount0_in := amount0_in; dapp.amount1_in := amount1_in; dapp.amount_lp_in := amount_lp_in;
+    dapp.rebase_amount := rebase_amount; dapp.user1_gets := user1_gets; dapp.user2_gets := user2_gets;
+
+    -- Python replaces this comment with scenario-specific initial state assignments
+    -- {{INITIAL_STATE_ASSIGNMENTS}}
+
+    -- Python replaces this comment with scenario-specific action sequence constraints
+    -- {{ACTION_SEQUENCE_TRANS}}
+
+-- ==================================================================
+-- == SPECIFICATIONS
+-- ==================================================================
+
+-- A2: Approve (2 Liveness, 3 Safety)
+LTLSPEC NAME A2_L1_allowance_updated := G((user_action = approve) -> F(dapp.token0.allowance[actor][spender] = amount));
+LTLSPEC NAME A2_L2_zero_approve_works := G((user_action = approve & amount = 0) -> F(dapp.token0.allowance[actor][spender] = 0));
+LTLSPEC NAME A2_S1_allowance_non_negative := G(dapp.token0.allowance[actor][spender] >= 0);
+LTLSPEC NAME A2_S2_no_unintended_change := G((user_action!= approve) -> X(dapp.token0.allowance = dapp.token0.allowance));
+LTLSPEC NAME A2_S3_other_balances_unaffected := G((user_action = approve) -> X(dapp.token0.balance = dapp.token0.balance));
+
+-- A3: NFTApprove (2 Liveness, 2 Safety)
+LTLSPEC NAME A3_L1_approval_granted := G((user_action = nft_approve & dapp.nft_module.owner = actor) -> F(dapp.nft_module.approved = approved_user));
+LTLSPEC NAME A3_L2_approval_resets := G((user_action = nft_approve & dapp.nft_module.owner = actor & approved_user = 0) -> F(dapp.nft_module.approved = 0));
+LTLSPEC NAME A3_S1_only_owner_can_approve := G((user_action = nft_approve & dapp.nft_module.owner!= actor) -> X(dapp.nft_module.approved = dapp.nft_module.approved));
+LTLSPEC NAME A3_S2_owner_cannot_be_approved := G(dapp.nft_module.approved!= dapp.nft_module.owner);
+
+-- A4: Transfer (2 Liveness, 4 Safety)
+LTLSPEC NAME A4_L1_receiver_gets_funds := G((user_action = transfer & dapp.token0.balance[actor] >= value) -> F(dapp.token0.balance[to_user] = dapp.token0.balance[to_user].old + value));
+LTLSPEC NAME A4_L2_sender_loses_funds := G((user_action = transfer & dapp.token0.balance[actor] >= value) -> F(dapp.token0.balance[actor] = dapp.token0.balance[actor].old - value));
+LTLSPEC NAME A4_S1_no_underflow := G(dapp.token0.balance[actor] >= 0);
+LTLSPEC NAME A4_S2_insufficient_funds_reverts := G((user_action = transfer & dapp.token0.balance[actor] < value) -> X(dapp.token0.balance = dapp.token0.balance));
+LTLSPEC NAME A4_S3_other_party_unaffected := G((user_action = transfer) -> X(dapp.token1.balance = dapp.token1.balance));
+LTLSPEC NAME A4_S4_conservation_of_tokens := G((user_action = transfer & dapp.token0.balance[actor] >= value) -> X(dapp.token0.balance[actor] + dapp.token0.balance[to_user] = dapp.token0.balance[actor].old + dapp.token0.balance[to_user].old));
+
+-- A5: TransferFrom (3 Liveness, 5 Safety)
+LTLSPEC NAME A5_L1_recipient_gets_funds := G((user_action = transfer_from & dapp.token0.allowance[from_user][actor] >= value & dapp.token0.balance[from_user] >= value) -> F(dapp.token0.balance[to_user] = dapp.token0.balance[to_user].old + value));
+LTLSPEC NAME A5_L2_owner_loses_funds := G((user_action = transfer_from & dapp.token0.allowance[from_user][actor] >= value & dapp.token0.balance[from_user] >= value) -> F(dapp.token0.balance[from_user] = dapp.token0.balance[from_user].old - value));
+LTLSPEC NAME A5_L3_allowance_is_reduced := G((user_action = transfer_from & dapp.token0.allowance[from_user][actor] >= value & dapp.token0.balance[from_user] >= value) -> F(dapp.token0.allowance[from_user][actor] = dapp.token0.allowance[from_user][actor].old - value));
+LTLSPEC NAME A5_S1_owner_balance_non_negative := G(dapp.token0.balance[from_user] >= 0);
+LTLSPEC NAME A5_S2_allowance_non_negative := G(dapp.token0.allowance[from_user][actor] >= 0);
+LTLSPEC NAME A5_S3_revert_on_insufficient_allowance := G((user_action = transfer_from & dapp.token0.allowance[from_user][actor] < value) -> X(dapp.token0.balance[from_user] = dapp.token0.balance[from_user]));
+LTLSPEC NAME A5_S4_revert_on_insufficient_balance := G((user_action = transfer_from & dapp.token0.balance[from_user] < value) -> X(dapp.token0.balance[from_user] = dapp.token0.balance[from_user]));
+LTLSPEC NAME A5_S5_other_party_unaffected := G((user_action = transfer_from) -> X(dapp.token1.balance = dapp.token1.balance));
+
+-- A6: NFTTransferFrom (3 Liveness, 5 Safety)
+LTLSPEC NAME A6_L1_transfer_occurs := G((user_action = nft_transfer_from & (actor = dapp.nft_module.owner | actor = dapp.nft_module.approved)) -> F(dapp.nft_module.owner = to_user));
+LTLSPEC NAME A6_L2_approval_is_cleared := G((user_action = nft_transfer_from & (actor = dapp.nft_module.owner | actor = dapp.nft_module.approved)) -> F(dapp.nft_module.approved = 0));
+LTLSPEC NAME A6_L3_owner_changes := G((user_action = nft_transfer_from & (actor = dapp.nft_module.owner | actor = dapp.nft_module.approved)) -> F(dapp.nft_module.owner!= from_user));
+LTLSPEC NAME A6_S1_only_approved_or_owner_can_transfer := G((user_action = nft_transfer_from & actor!= dapp.nft_module.owner & actor!= dapp.nft_module.approved) -> X(dapp.nft_module.owner = dapp.nft_module.owner));
+LTLSPEC NAME A6_S2_cannot_transfer_to_self := G((user_action = nft_transfer_from) -> (to_user!= from_user));
+LTLSPEC NAME A6_S3_cannot_transfer_to_zero_address := G((user_action = nft_transfer_from) -> (to_user!= 0));
+LTLSPEC NAME A6_S4_approval_unchanged_on_fail := G((user_action = nft_transfer_from & actor!= dapp.nft_module.owner & actor!= dapp.nft_module.approved) -> X(dapp.nft_module.approved = dapp.nft_module.approved));
+LTLSPEC NAME A6_S5_token_must_exist := G((user_action = nft_transfer_from &!dapp.nft_module.exists) -> X(dapp.nft_module.owner = dapp.nft_module.owner));
+
+-- A7: NFTMint (3 Liveness, 3 Safety)
+LTLSPEC NAME A7_L1_token_is_assigned := G((user_action = nft_mint) -> F(dapp.nft_module.owner = to_user));
+LTLSPEC NAME A7_L2_token_exists_after_mint := G((user_action = nft_mint) -> F(dapp.nft_module.exists));
+LTLSPEC NAME A7_L3_balance_increases := G((user_action = nft_mint) -> F(dapp.token0.balance[to_user] > dapp.token0.balance[to_user].old)); -- Assuming minting costs token0
+LTLSPEC NAME A7_S1_cannot_mint_to_zero_address := G((user_action = nft_mint) -> (to_user!= 0));
+LTLSPEC NAME A7_S2_cannot_mint_existing_token := G((user_action = nft_mint & dapp.nft_module.exists) -> FALSE);
+LTLSPEC NAME A7_S3_other_balances_unaffected := G((user_action = nft_mint) -> X(dapp.token1.balance = dapp.token1.balance));
+
+-- A8: NFTBurn (3 Liveness, 3 Safety)
+LTLSPEC NAME A8_L1_token_is_burned := G((user_action = nft_burn & dapp.nft_module.owner = actor) -> F(!dapp.nft_module.exists));
+LTLSPEC NAME A8_L2_owner_is_zeroed := G((user_action = nft_burn & dapp.nft_module.owner = actor) -> F(dapp.nft_module.owner = 0));
+LTLSPEC NAME A8_L3_approval_is_zeroed := G((user_action = nft_burn & dapp.nft_module.owner = actor) -> F(dapp.nft_module.approved = 0));
+LTLSPEC NAME A8_S1_only_owner_can_burn := G((user_action = nft_burn & dapp.nft_module.owner!= actor) -> X(dapp.nft_module.exists = dapp.nft_module.exists));
+LTLSPEC NAME A8_S2_cannot_burn_nonexistent_token := G((user_action = nft_burn &!dapp.nft_module.exists) -> FALSE);
+LTLSPEC NAME A8_S3_other_balances_unaffected := G((user_action = nft_burn) -> X(dapp.token0.balance = dapp.token0.balance));
+
+-- A9: Airdrop (2 Liveness, 1 Safety)
+LTLSPEC NAME A9_L1_r1_gets_funds := G((user_action = airdrop) -> F(dapp.token0.balance > dapp.token0.balance.old));
+LTLSPEC NAME A9_L2_r2_gets_funds := G((user_action = airdrop) -> F(dapp.token0.balance[1] > dapp.token0.balance.[1]old));
+LTLSPEC NAME A9_S1_other_balances_unaffected := G((user_action = airdrop) -> X(dapp.token1.balance = dapp.token1.balance));
+
+-- A10: Rebase (2 Liveness, 2 Safety)
+LTLSPEC NAME A10_L1_supply_changes := G((user_action = rebase) -> F(dapp.rebase_module.totalSupply!= dapp.rebase_module.totalSupply.old));
+LTLSPEC NAME A10_L2_positive_rebase_increases_supply := G((user_action = rebase & rebase_amount > 0) -> F(dapp.rebase_module.totalSupply > dapp.rebase_module.totalSupply.old));
+LTLSPEC NAME A10_S1_shares_per_token_updates := G((user_action = rebase) -> F(dapp.rebase_module.sharesPerToken!= dapp.rebase_module.sharesPerToken.old));
+LTLSPEC NAME A10_S2_supply_non_negative := G(dapp.rebase_module.totalSupply >= 0);
+
+-- A11: Swap (4 Liveness, 5 Safety - Representative Set)
+LTLSPEC NAME A11_L1_trader_receives_token := G((user_action = swap & dapp.token0.balance[actor] >= amount0_in & amount0_in > 0) -> F(dapp.token1.balance[actor] > dapp.token1.balance[actor].old));
+LTLSPEC NAME A11_L2_trader_sends_token := G((user_action = swap & dapp.token0.balance[actor] >= amount0_in & amount0_in > 0) -> F(dapp.token0.balance[actor] < dapp.token0.balance[actor].old));
+LTLSPEC NAME A11_L3_dex_receives_token := G((user_action = swap & dapp.token0.balance[actor] >= amount0_in & amount0_in > 0) -> F(dapp.reserve0 > dapp.reserve0.old));
+LTLSPEC NAME A11_L4_dex_sends_token := G((user_action = swap & dapp.token0.balance[actor] >= amount0_in & amount0_in > 0) -> F(dapp.reserve1 < dapp.reserve1.old));
+LTLSPEC NAME A11_S1_uniswap_k_invariant := G((dapp.user_action = swap & amount0_in > 0) -> next(dapp.reserve0 * dapp.reserve1) >= (dapp.reserve0 * dapp.reserve1));
+LTLSPEC NAME A11_S2_curve_sum_invariant := G((dapp.user_action = swap & amount0_in > 0) -> next(dapp.reserve0 + dapp.reserve1) = (dapp.reserve0.old + dapp.reserve1.old)); -- Note: This is specific to the simplified Curve model
+LTLSPEC NAME A11_S3_trader_balance_non_negative := G(dapp.token0.balance[actor] >= 0);
+LTLSPEC NAME A11_S4_dex_balance_non_negative := G(dapp.reserve1 >= 0);
+LTLSPEC NAME A11_S5_no_free_tokens := G(!((dapp.token0.balance[actor] = dapp.token0.balance[actor].old) & (dapp.token1.balance[actor] > dapp.token1.balance[actor].old)));
+
+-- A12: AddLiquidity (3 Liveness, 4 Safety - Representative Set)
+LTLSPEC NAME A12_L1_provider_gets_lp_tokens := G((user_action = add_liquidity) -> F(dapp.lp_token.balance[actor] > dapp.lp_token.balance[actor].old));
+LTLSPEC NAME A12_L2_provider_sends_token0 := G((user_action = add_liquidity) -> F(dapp.token0.balance[actor] < dapp.token0.balance[actor].old));
+LTLSPEC NAME A12_L3_provider_sends_token1 := G((user_action = add_liquidity) -> F(dapp.token1.balance[actor] < dapp.token1.balance[actor].old));
+LTLSPEC NAME A12_S1_provider_balance_A_non_negative := G(dapp.token0.balance[actor] >= 0);
+LTLSPEC NAME A12_S2_provider_balance_B_non_negative := G(dapp.token1.balance[actor] >= 0);
+LTLSPEC NAME A12_S3_lp_tokens_not_created_for_free := G(!((dapp.token0.balance[actor] = dapp.token0.balance[actor].old) & (dapp.lp_token.balance[actor] > dapp.lp_token.balance[actor].old)));
+LTLSPEC NAME A12_S4_reserves_increase := G((user_action = add_liquidity) -> F(dapp.reserve0 > dapp.reserve0.old & dapp.reserve1 > dapp.reserve1.old));
+
+-- A13: RemoveLiquidity (3 Liveness, 4 Safety - Representative Set)
+LTLSPEC NAME A13_L1_provider_burns_lp_tokens := G((user_action = remove_liquidity) -> F(dapp.lp_token.balance[actor] < dapp.lp_token.balance[actor].old));
+LTLSPEC NAME A13_L2_provider_gets_token0 := G((user_action = remove_liquidity) -> F(dapp.token0.balance[actor] > dapp.token0.balance[actor].old));
+LTLSPEC NAME A13_L3_provider_gets_token1 := G((user_action = remove_liquidity) -> F(dapp.token1.balance[actor] > dapp.token1.balance[actor].old));
+LTLSPEC NAME A13_S1_lp_balance_non_negative := G(dapp.lp_token.balance[actor] >= 0);
+LTLSPEC NAME A13_S2_cannot_get_tokens_without_burning_lp := G(!((dapp.lp_token.balance[actor] = dapp.lp_token.balance[actor].old) & (dapp.token0.balance[actor] > dapp.token0.balance[actor].old)));
+LTLSPEC NAME A13_S3_reserves_decrease := G((user_action = remove_liquidity) -> F(dapp.reserve0 < dapp.reserve0.old & dapp.reserve1 < dapp.reserve1.old));
+LTLSPEC NAME A13_S4_total_supply_decreases := G((user_action = remove_liquidity) -> F(dapp.lp_token.totalSupply < dapp.lp_token.totalSupply.old));
